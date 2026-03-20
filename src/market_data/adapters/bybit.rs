@@ -9,62 +9,88 @@ use crate::market_data::{
     types::{Instrument, InstrumentType, PriceTick},
 };
 
-pub struct BinanceFetcher {
+pub struct BybitFetcher {
     client: Client,
     base_url: String,
 }
 
-impl BinanceFetcher {
+impl BybitFetcher {
     pub fn new() -> Self {
         Self {
             client: Client::new(),
-            base_url: "https://api.binance.com/api/v3".to_string(),
+            base_url: "https://api.bybit.com/v5/market".to_string(),
         }
     }
 }
 
 #[derive(Debug, Deserialize)]
-pub struct BinanceTickerResponse {
+pub struct BybitResponse<T> {
+    pub result: BybitResult<T>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BybitResult<T> {
+    pub list: Vec<T>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BybitTickerData {
     pub symbol: String,
     #[serde(rename = "lastPrice")]
     pub last_price: String,
-    pub volume: String,
+    pub volume24h: String,
 }
 
 #[async_trait]
-impl MarketDataFetcher for BinanceFetcher {
+impl MarketDataFetcher for BybitFetcher {
     async fn fetch_price(&self, symbol: &str) -> Result<MarketEvent, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/ticker/24hr?symbol={}", self.base_url, symbol);
+        let bybit_symbol = if symbol.contains("USDT") {
+            symbol.to_string()
+        } else {
+            format!("{}USDT", symbol)
+        };
+
+        let url = format!(
+            "{}/tickers?category=spot&symbol={}",
+            self.base_url, bybit_symbol
+        );
 
         let response = self.client
             .get(&url)
             .send()
             .await?
-            .json::<BinanceTickerResponse>()
+            .json::<BybitResponse<BybitTickerData>>()
             .await?;
 
-        let price: f64 = response.last_price.parse()?;
+        let ticker = response
+            .result
+            .list
+            .into_iter()
+            .next()
+            .ok_or_else(|| "No ticker data from Bybit".to_string())?;
 
-        Ok(normalize_binance_price(
-            &response.symbol,
+        let price: f64 = ticker.last_price.parse()?;
+
+        Ok(normalize_bybit_price(
+            &ticker.symbol,
             price,
             Utc::now(),
         ))
     }
 
     fn exchange_name(&self) -> &str {
-        "Binance"
+        "Bybit"
     }
 }
 
-pub fn normalize_binance_price(
+pub fn normalize_bybit_price(
     symbol: &str,
     price: f64,
     timestamp: chrono::DateTime<Utc>,
 ) -> MarketEvent {
     let instrument = Instrument {
         symbol: symbol.to_string(),
-        exchange: "binance".to_string(),
+        exchange: "bybit".to_string(),
         instrument_type: InstrumentType::Spot,
     };
 

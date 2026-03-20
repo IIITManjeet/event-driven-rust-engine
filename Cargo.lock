@@ -1042,6 +1042,7 @@ dependencies = [
  "dotenv",
  "governor",
  "nonzero_ext",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
