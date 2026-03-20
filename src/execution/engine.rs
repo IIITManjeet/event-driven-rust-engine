@@ -28,6 +28,14 @@ pub struct ExecutionEngine {
     fills: Vec<Fill>,
     next_order_id: u64,
     account_balance: f64,
+    
+    // Risk limits
+    max_positions: usize,
+    max_position_size: f64,
+    daily_start_balance: f64,
+    daily_loss_limit: f64,
+    kill_switch_active: bool,
+    kill_reason: Option<String>,
 }
 
 impl ExecutionEngine {
@@ -39,6 +47,58 @@ impl ExecutionEngine {
             fills: Vec::new(),
             next_order_id: 1,
             account_balance: initial_balance,
+            max_positions: 5,
+            max_position_size: 1.0,
+            daily_start_balance: initial_balance,
+            daily_loss_limit: initial_balance * 0.10, // 10% max daily loss
+            kill_switch_active: false,
+            kill_reason: None,
+        }
+    }
+
+    pub fn with_risk_limits(
+        event_bus: EventBus,
+        initial_balance: f64,
+        max_positions: usize,
+        max_position_size: f64,
+        daily_loss_pct: f64,
+    ) -> Self {
+        Self {
+            event_bus,
+            trades: Vec::new(),
+            orders: HashMap::new(),
+            fills: Vec::new(),
+            next_order_id: 1,
+            account_balance: initial_balance,
+            max_positions,
+            max_position_size,
+            daily_start_balance: initial_balance,
+            daily_loss_limit: initial_balance * daily_loss_pct,
+            kill_switch_active: false,
+            kill_reason: None,
+        }
+    }
+
+    pub fn check_risk(&self) -> Result<(), String> {
+        if self.kill_switch_active {
+            return Err(format!("Kill switch active: {:?}", self.kill_reason));
+        }
+        Ok(())
+    }
+
+    pub fn is_kill_switch_active(&self) -> bool {
+        self.kill_switch_active
+    }
+
+    pub fn kill_reason(&self) -> Option<&str> {
+        self.kill_reason.as_deref()
+    }
+
+    fn check_daily_loss(&mut self) {
+        let current_pnl = self.account_balance - self.daily_start_balance;
+        if current_pnl < -self.daily_loss_limit {
+            self.kill_switch_active = true;
+            self.kill_reason = Some(format!("Daily loss limit hit: ${:.2}", current_pnl));
         }
     }
 
@@ -50,6 +110,17 @@ impl ExecutionEngine {
         position_size: f64,
         stop_loss: f64,
     ) -> Result<Trade, String> {
+        // Risk checks
+        self.check_risk()?;
+        
+        if self.trades.len() >= self.max_positions {
+            return Err(format!("Max positions reached: {}", self.max_positions));
+        }
+        
+        if position_size > self.max_position_size {
+            return Err(format!("Position size {} exceeds max {}", position_size, self.max_position_size));
+        }
+        
         let trade_cost = entry_price * position_size;
         
         if trade_cost > self.account_balance {
@@ -185,6 +256,9 @@ impl ExecutionEngine {
         // Return the position value plus PnL to balance
         let position_value = exit_price * trade.position_size;
         self.account_balance += position_value + pnl;
+
+        // Check daily loss limit after trade closes
+        self.check_daily_loss();
 
         self.event_bus.publish(EngineEvent::TradeClosed {
             symbol: symbol.to_string(),

@@ -13,6 +13,7 @@ use rust_event_driven_trader::engine::{EventBus, EngineEvent, Signal};
 use rust_event_driven_trader::portfolio::{Portfolio, PositionSide};
 use rust_event_driven_trader::execution::ExecutionEngine;
 use rust_event_driven_trader::strategy::{Strategy, SimpleStrategy};
+use rust_event_driven_trader::risk::{RiskEngine, RiskLimits};
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
@@ -69,18 +70,32 @@ fn print_trade(action: &str, symbol: &str, price: f64, size: f64, sl: f64) {
     println!("  {}│{}│{}", line, RESET, BOLD);
 }
 
-fn print_portfolio(balance: f64, positions: usize, unrealized: f64, realized: f64) {
+fn print_portfolio(balance: f64, positions: usize, unrealized: f64, realized: f64, risk_engine: &RiskEngine) {
+    let limits = risk_engine.get_limits();
+    let state = risk_engine.get_state();
+    
     println!("\n  {}┌─────────────────────────────────────┐{}", BOLD, RESET);
     println!("  {}│ {} PORTFOLIO STATUS{}              │", BOLD, YELLOW, RESET);
     println!("  {}├─────────────────────────────────────┤{}", BOLD, RESET);
     println!("  {}│ {} Balance:      ${:>12.2}    │{}", BOLD, DIM, balance, RESET);
-    println!("  {}│ {} Open Trades:  {:>12}    │{}", BOLD, DIM, positions, RESET);
+    println!("  {}│ {} Open Trades:  {:>12}/{}    │{}", BOLD, DIM, positions, limits.max_positions, RESET);
     
     let pnl_color = if unrealized >= 0.0 { GREEN } else { RED };
     println!("  {}│ {} Unrealized:   {}${:>11.2}    │{}", BOLD, DIM, pnl_color, unrealized, RESET);
     
     let realized_color = if realized >= 0.0 { GREEN } else { RED };
     println!("  {}│ {} Realized:     {}${:>11.2}    │{}", BOLD, DIM, realized_color, realized, RESET);
+    
+    let risk_color = if state.kill_switch_active { RED } else { GREEN };
+    let risk_status = if state.kill_switch_active { 
+        state.kill_reason.as_deref().unwrap_or("ACTIVE") 
+    } else { 
+        "OK" 
+    };
+    println!("  {}├─────────────────────────────────────┤{}", BOLD, RESET);
+    println!("  {}│ {} Risk Status:  {}{}        │{}", BOLD, DIM, risk_color, risk_status, RESET);
+    println!("  {}│ {} Daily P&L:    ${:>11.2}    │{}", BOLD, DIM, state.daily_pnl, RESET);
+    println!("  {}│ {} Max Loss:     {:>11.1}%    │{}", BOLD, DIM, limits.max_daily_loss_pct * 100.0, RESET);
     println!("  {}└─────────────────────────────────────┘{}", BOLD, RESET);
 }
 
@@ -150,6 +165,7 @@ async fn main() {
     let event_bus = EventBus::new();
     let mut portfolio = Portfolio::new();
     let mut execution = ExecutionEngine::new(event_bus.clone(), 10000.0);
+    let mut risk_engine = RiskEngine::with_default_limits(10000.0);
     let mut simple_strategy = SimpleStrategy::new(0.01);
     let mut latest_prices: HashMap<String, f64> = HashMap::new();
 
@@ -160,10 +176,10 @@ async fn main() {
     }).ok();
 
     match choice {
-        "1" => run_coingecko(event_bus, &mut portfolio, &mut execution, &mut simple_strategy, &mut latest_prices).await,
-        "2" => run_binance(event_bus, &mut portfolio, &mut execution, &mut simple_strategy, &mut latest_prices).await,
-        "3" => run_bybit(event_bus, &mut portfolio, &mut execution, &mut simple_strategy, &mut latest_prices).await,
-        "4" => run_binance_futures(event_bus, &mut portfolio, &mut execution, &mut simple_strategy, &mut latest_prices).await,
+        "1" => run_coingecko(event_bus, &mut portfolio, &mut execution, &mut simple_strategy, &mut latest_prices, &mut risk_engine).await,
+        "2" => run_binance(event_bus, &mut portfolio, &mut execution, &mut simple_strategy, &mut latest_prices, &mut risk_engine).await,
+        "3" => run_bybit(event_bus, &mut portfolio, &mut execution, &mut simple_strategy, &mut latest_prices, &mut risk_engine).await,
+        "4" => run_binance_futures(event_bus, &mut portfolio, &mut execution, &mut simple_strategy, &mut latest_prices, &mut risk_engine).await,
         _ => println!("{}Invalid choice!{}", RED, RESET),
     }
 }
@@ -174,6 +190,7 @@ async fn run_coingecko(
     execution: &mut ExecutionEngine,
     strategy: &mut SimpleStrategy,
     latest_prices: &mut HashMap<String, f64>,
+    risk_engine: &mut RiskEngine,
 ) {
     dotenv::dotenv().ok();
     
@@ -202,7 +219,7 @@ async fn run_coingecko(
                 }
                 
                 if let Some(strategy_event) = strategy.on_market_event(event.clone()).await {
-                    handle_strategy_event(strategy_event, portfolio, execution);
+                    handle_strategy_event(strategy_event, portfolio, execution, risk_engine);
                 }
 
                 event_bus.publish(EngineEvent::PriceUpdated(event)).ok();
@@ -210,7 +227,7 @@ async fn run_coingecko(
         }
         
         update_and_check_positions(portfolio, execution, &event_bus, latest_prices);
-        print_portfolio(execution.balance(), execution.open_positions(), portfolio.unrealized_pnl(), portfolio.realized_pnl());
+        print_portfolio(execution.balance(), execution.open_positions(), portfolio.unrealized_pnl(), portfolio.realized_pnl(), risk_engine);
         sleep(Duration::from_secs(5)).await;
     }
 }
@@ -221,6 +238,7 @@ async fn run_binance(
     execution: &mut ExecutionEngine,
     strategy: &mut SimpleStrategy,
     latest_prices: &mut HashMap<String, f64>,
+    risk_engine: &mut RiskEngine,
 ) {
     let fetcher = BinanceFetcher::new();
     let symbols = ["BTCUSDT", "ETHUSDT"];
@@ -238,7 +256,7 @@ async fn run_binance(
                     }
                     
                     if let Some(strategy_event) = strategy.on_market_event(event.clone()).await {
-                        handle_strategy_event(strategy_event, portfolio, execution);
+                        handle_strategy_event(strategy_event, portfolio, execution, risk_engine);
                     }
 
                     event_bus.publish(EngineEvent::PriceUpdated(event)).ok();
@@ -248,7 +266,7 @@ async fn run_binance(
         }
         
         update_and_check_positions(portfolio, execution, &event_bus, latest_prices);
-        print_portfolio(execution.balance(), execution.open_positions(), portfolio.unrealized_pnl(), portfolio.realized_pnl());
+        print_portfolio(execution.balance(), execution.open_positions(), portfolio.unrealized_pnl(), portfolio.realized_pnl(), risk_engine);
         sleep(Duration::from_secs(5)).await;
     }
 }
@@ -259,6 +277,7 @@ async fn run_bybit(
     execution: &mut ExecutionEngine,
     strategy: &mut SimpleStrategy,
     latest_prices: &mut HashMap<String, f64>,
+    risk_engine: &mut RiskEngine,
 ) {
     let fetcher = BybitFetcher::new();
     let symbols = ["BTC", "ETH"];
@@ -276,7 +295,7 @@ async fn run_bybit(
                     }
                     
                     if let Some(strategy_event) = strategy.on_market_event(event.clone()).await {
-                        handle_strategy_event(strategy_event, portfolio, execution);
+                        handle_strategy_event(strategy_event, portfolio, execution, risk_engine);
                     }
 
                     event_bus.publish(EngineEvent::PriceUpdated(event)).ok();
@@ -286,7 +305,7 @@ async fn run_bybit(
         }
         
         update_and_check_positions(portfolio, execution, &event_bus, latest_prices);
-        print_portfolio(execution.balance(), execution.open_positions(), portfolio.unrealized_pnl(), portfolio.realized_pnl());
+        print_portfolio(execution.balance(), execution.open_positions(), portfolio.unrealized_pnl(), portfolio.realized_pnl(), risk_engine);
         sleep(Duration::from_secs(5)).await;
     }
 }
@@ -297,6 +316,7 @@ async fn run_binance_futures(
     execution: &mut ExecutionEngine,
     strategy: &mut SimpleStrategy,
     latest_prices: &mut HashMap<String, f64>,
+    risk_engine: &mut RiskEngine,
 ) {
     let fetcher = BinanceFuturesFetcher::new();
     let symbols = ["BTCUSDT", "ETHUSDT"];
@@ -314,7 +334,7 @@ async fn run_binance_futures(
                     }
                     
                     if let Some(strategy_event) = strategy.on_market_event(event.clone()).await {
-                        handle_strategy_event(strategy_event, portfolio, execution);
+                        handle_strategy_event(strategy_event, portfolio, execution, risk_engine);
                     }
 
                     event_bus.publish(EngineEvent::PriceUpdated(event)).ok();
@@ -324,7 +344,7 @@ async fn run_binance_futures(
         }
         
         update_and_check_positions(portfolio, execution, &event_bus, latest_prices);
-        print_portfolio(execution.balance(), execution.open_positions(), portfolio.unrealized_pnl(), portfolio.realized_pnl());
+        print_portfolio(execution.balance(), execution.open_positions(), portfolio.unrealized_pnl(), portfolio.realized_pnl(), risk_engine);
         sleep(Duration::from_secs(5)).await;
     }
 }
@@ -333,11 +353,23 @@ fn handle_strategy_event(
     event: rust_event_driven_trader::strategy::StrategyEvent,
     portfolio: &mut Portfolio,
     execution: &mut ExecutionEngine,
+    risk_engine: &mut RiskEngine,
 ) {
     match event {
         rust_event_driven_trader::strategy::StrategyEvent::Buy { instrument, price, timestamp: _ } => {
             if portfolio.get_position(&instrument.symbol).is_some() {
                 print_skip(&instrument.symbol, "Position already open");
+                return;
+            }
+            
+            let trade_value = price * 0.01;
+            if let Err(e) = risk_engine.pre_trade_check(
+                portfolio.open_positions(),
+                execution.balance(),
+                trade_value,
+                &instrument.symbol,
+            ) {
+                println!("  {}│ Risk rejected: {}│", RED, e);
                 return;
             }
             
@@ -361,6 +393,7 @@ fn handle_strategy_event(
                         position_size,
                         stop_loss,
                     ).ok();
+                    risk_engine.post_trade_check(execution.balance());
                 }
                 Err(e) => println!("  {}│ Execution failed: {}│", RED, e),
             }
@@ -369,6 +402,17 @@ fn handle_strategy_event(
         rust_event_driven_trader::strategy::StrategyEvent::Sell { instrument, price, timestamp: _ } => {
             if portfolio.get_position(&instrument.symbol).is_some() {
                 print_skip(&instrument.symbol, "Position already open");
+                return;
+            }
+            
+            let trade_value = price * 0.01;
+            if let Err(e) = risk_engine.pre_trade_check(
+                portfolio.open_positions(),
+                execution.balance(),
+                trade_value,
+                &instrument.symbol,
+            ) {
+                println!("  {}│ Risk rejected: {}│", RED, e);
                 return;
             }
             
@@ -392,6 +436,7 @@ fn handle_strategy_event(
                         position_size,
                         stop_loss,
                     ).ok();
+                    risk_engine.post_trade_check(execution.balance());
                 }
                 Err(e) => println!("  {}│ Execution failed: {}│", RED, e),
             }

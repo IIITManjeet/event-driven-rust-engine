@@ -20,11 +20,42 @@ A high-performance, event-driven cryptocurrency trading system built in Rust wit
 - **Event Bus** - Pub/sub architecture for decoupled components
 - **Portfolio Management** - Position tracking, PnL calculation (realized/unrealized)
 - **Execution Engine** - Paper trading with order management
-- **Risk Management** - Stop-loss, position limits
+- **Risk Management** - Comprehensive risk controls
 
 ### Strategies
 - **Simple Strategy** - Price change threshold-based trading
 - **Arbitrage Strategy** - Cross-exchange price difference detection
+
+## Risk Management
+
+The system includes comprehensive risk management with configurable limits:
+
+### Risk Limits
+| Limit | Default | Description |
+|-------|---------|-------------|
+| Max Positions | 5 | Maximum concurrent open positions |
+| Max Position Size | 1.0 | Maximum size per position |
+| Max Daily Loss | 10% | Daily loss limit before kill switch |
+| Max Exposure | 80% | Maximum portfolio exposure |
+| Min Trade Size | 0.1% | Minimum trade as % of balance |
+
+### Risk Features
+- **Pre-trade Checks** - Validates before executing any trade
+- **Post-trade Checks** - Monitors daily loss after each trade
+- **Kill Switch** - Automatically halts trading when limits exceeded
+- **Real-time Status** - Displays risk metrics in CLI
+
+### Risk Profiles
+```rust
+// Default (balanced)
+RiskEngine::with_default_limits(10000.0)
+
+// Conservative (safer)
+RiskEngine::new(10000.0, RiskLimits::conservative())
+
+// Aggressive (higher risk)
+RiskEngine::new(10000.0, RiskLimits::aggressive())
+```
 
 ## Project Structure
 
@@ -58,6 +89,9 @@ src/
 ├── portfolio/             # Position management
 │   ├── portfolio.rs       # Portfolio with PnL
 │   └── position.rs        # Position with stop-loss
+├── risk/                  # Risk management
+│   ├── risk.rs            # RiskEngine, RiskLimits, RiskState
+│   └── basic.rs
 └── utils/                 # Utilities
 ```
 
@@ -89,7 +123,7 @@ cargo run
    - Fetch real-time market data
    - Run the strategy to generate signals
    - Execute trades (paper trading)
-   - Display portfolio status
+   - Display portfolio status with risk metrics
 
 ### Environment Variables
 
@@ -130,6 +164,40 @@ trait Strategy: Send {
     async fn on_market_event(&mut self, event: MarketEvent) -> Option<StrategyEvent>;
     fn name(&self) -> &str;
 }
+```
+
+## CLI Output Example
+
+```
+══════════════════════════════════════════════════
+  BINANCE TRADING (Spot)
+══════════════════════════════════════════════════
+  Symbols: ["BTCUSDT", "ETHUSDT"]
+
+  │ Binance BTCUSDT      │ $  69822.40 │  +0.0000% │
+  │ Binance ETHUSDT      │ $   2123.64 │  +0.0000% │
+
+  ⚡ BUY SIGNAL | ETHUSDT @ $2123.64
+  │────────────────────────────────────│
+  │ Action: BUY
+  │ Symbol:  ETHUSDT
+  │ Price:   $2123.64
+  │ Size:    0.01
+  │ Stop:    $2017.46
+  │────────────────────────────────────│
+
+  ┌─────────────────────────────────────┐
+  │ PORTFOLIO STATUS                    │
+  ├─────────────────────────────────────┤
+  │ Balance:      $      9978.76        │
+  │ Open Trades:  1/5                   │
+  │ Unrealized:   $        0.00         │
+  │ Realized:     $        0.00         │
+  ├─────────────────────────────────────┤
+  │ Risk Status:  OK                    │
+  │ Daily P&L:    $       -21.24        │
+  │ Max Loss:     10.0%                 │
+  └─────────────────────────────────────┘
 ```
 
 ## Dependencies
