@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use crate::core::instrument::Instrument;
+use crate::market_data::types::Instrument;
 
 #[derive(Debug, Clone)]
 pub enum StrategyEvent {

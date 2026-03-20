@@ -66,11 +66,19 @@ pub fn normalize_binance_price(
         symbol: symbol.to_string(),
         exchange: "binance".to_string(),
         instrument_type: InstrumentType::Spot,
+        base_asset: Some(symbol.replace("USDT", "")),
+        quote_asset: Some("USDT".to_string()),
+        expiry_date: None,
+        strike_price: None,
+        option_type: None,
     };
 
     MarketEvent::Price(PriceTick {
         instrument,
         price,
         timestamp,
+        bid: None,
+        ask: None,
+        volume: None,
     })
 }
